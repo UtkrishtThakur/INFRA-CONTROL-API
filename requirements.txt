@@ -1,0 +1,8 @@
+﻿fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pydantic-settings
+passlib[bcrypt]
+python-jose
