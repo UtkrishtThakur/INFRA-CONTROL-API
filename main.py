@@ -44,15 +44,21 @@ async def log_requests(request, call_next):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        # Local dev
         "http://localhost:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
+
+        # Production frontends
+        "https://securex.devlooper.co.in",
+        "https://devlooper.co.in",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # =========================
 # Routers
