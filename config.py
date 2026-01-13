@@ -1,25 +1,36 @@
 from pydantic_settings import BaseSettings
+from typing import Optional
 
 
 class Settings(BaseSettings):
+    # =========================
+    # Core Infrastructure
+    # =========================
     DATABASE_URL: str
-    REDIS_URL: str | None = None
+    REDIS_URL: Optional[str] = None
 
-    UPSTREAM_BASE_URL: str
-
+    # =========================
+    # Auth
+    # =========================
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
-    CONTROL_WORKER_SHARED_SECRET: str | None = None
+    # =========================
+    # Internal Security
+    # =========================
+    CONTROL_WORKER_SHARED_SECRET: str
 
+    # =========================
+    # Service Metadata
+    # =========================
     SERVICE_NAME: str = "control-api"
     ENV: str = "development"
-    WORKER_SECRET_KEY: str = "dev-secret"
 
     class Config:
         env_file = ".env"
         case_sensitive = True
         extra = "ignore"
+
 
 settings = Settings()
