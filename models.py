@@ -1,12 +1,5 @@
 import uuid
-from sqlalchemy import (
-    Column,
-    String,
-    Boolean,
-    DateTime,
-    Integer,
-    ForeignKey,
-)
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -28,44 +21,28 @@ class Project(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
-    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+    owner_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+    )
 
     upstream_base_url = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # relationships (CRITICAL)
-    api_keys = relationship(
-        "APIKey",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-
-    domains = relationship(
-        "Domain",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-
-    traffic_logs = relationship(
-        "TrafficLog",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
+    api_keys = relationship("APIKey", cascade="all, delete-orphan")
+    domains = relationship("Domain", cascade="all, delete-orphan")
+    traffic_logs = relationship("TrafficLog", cascade="all, delete-orphan")
 
 
 class APIKey(Base):
     __tablename__ = "api_keys"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
 
-    project_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("projects.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    key_hash = Column(String, nullable=False)
+    key_hash = Column(String, nullable=False, index=True)
     label = Column(String, nullable=True)
 
     is_active = Column(Boolean, default=True)
@@ -77,46 +54,37 @@ class Domain(Base):
     __tablename__ = "domains"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
 
-    project_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("projects.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    hostname = Column(String, nullable=False, unique=True, index=True)
+    hostname = Column(String, unique=True, nullable=False, index=True)
     verification_token = Column(String, nullable=False)
 
     verified = Column(Boolean, default=False)
-    verified_at = Column(DateTime(timezone=True), nullable=True)
+    verified_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class TrafficLog(Base):
+    """
+    Immutable request facts emitted by the worker.
+    """
+
     __tablename__ = "traffic_logs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
 
-    project_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("projects.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    api_key_id = Column(UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="SET NULL"), index=True)
 
-    api_key_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("api_keys.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-
-    ip = Column(String, nullable=False)
+    ip = Column(String, nullable=False, index=True)
     path = Column(String, nullable=False)
+    endpoint = Column(String, nullable=False, index=True)
     method = Column(String, nullable=False)
 
-    status = Column(Integer, nullable=False)
-    risk_score = Column(Integer, nullable=True)
-    blocked = Column(Boolean, default=False)
+    status_code = Column(Integer, nullable=False)
+    decision = Column(String, nullable=False)  # ALLOW | THROTTLE | BLOCK
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    risk_score = Column(Integer)
+    latency_ms = Column(Integer)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
