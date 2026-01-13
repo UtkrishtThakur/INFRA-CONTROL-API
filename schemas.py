@@ -100,3 +100,31 @@ class WorkerProjectConfig(BaseModel):
 
 class WorkerConfigOut(BaseModel):
     projects: List[WorkerProjectConfig]
+
+
+# =========================
+# Intelligence / Metrics
+# =========================
+
+class EndpointMetrics(BaseModel):
+    current_rpm: float
+    baseline_rpm: float
+    traffic_multiplier: float
+    throttle_rate: float
+    block_rate: float
+    avg_risk_score: Optional[float]
+
+
+class EndpointAnalysis(BaseModel):
+    endpoint: str
+    severity: str        # "NORMAL", "WATCH", "HIGH"
+    color: str           # "green", "yellow", "red"
+    summary: str         # Human-readable sentence
+    metrics: EndpointMetrics
+    securex_action: str
+    suggested_action: Optional[str]
+
+
+class EndpointAnalysisResponse(BaseModel):
+    generated_at: datetime
+    endpoints: List[EndpointAnalysis]
