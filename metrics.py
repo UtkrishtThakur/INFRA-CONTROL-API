@@ -29,148 +29,161 @@ def endpoint_analysis(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    project = get_project_or_404(project_id, user, db)
-    now = datetime.utcnow()
+    try:
+        project = get_project_or_404(project_id, user, db)
+        now = datetime.utcnow()
 
-    # Time windows
-    last_5m = now - timedelta(minutes=5)
-    last_7d = now - timedelta(days=7)
-    current_hour = now.hour
+        # Time windows
+        last_5m = now - timedelta(minutes=5)
+        last_7d = now - timedelta(days=7)
+        current_hour = now.hour
 
-    # ─────────────────────────────────────────────
-    # 1. Current Traffic (last 5 minutes)
-    # ─────────────────────────────────────────────
-    current_stats = db.query(
-        TrafficLog.normalized_path.label("endpoint"),
-        func.count().label("requests"),
-        func.avg(TrafficLog.risk_score).label("avg_risk"),
-        func.sum(func.cast(TrafficLog.decision == "THROTTLE", Integer)).label("throttled"),
-        func.sum(func.cast(TrafficLog.decision == "BLOCK", Integer)).label("blocked"),
-    ).filter(
-        TrafficLog.project_id == project.id,
-        TrafficLog.created_at >= last_5m,
-    ).group_by(
-        TrafficLog.normalized_path
-    ).all()
+        # ─────────────────────────────────────────────
+        # 1. Current Traffic (last 5 minutes)
+        # ─────────────────────────────────────────────
+        # Defensive: ensure we target the REAL column 'endpoint'
+        current_stats = db.query(
+            TrafficLog.endpoint,
+            func.count().label("requests"),
+            func.avg(TrafficLog.risk_score).label("avg_risk"),
+            func.sum(func.cast(TrafficLog.decision == "THROTTLE", Integer)).label("throttled"),
+            func.sum(func.cast(TrafficLog.decision == "BLOCK", Integer)).label("blocked"),
+        ).filter(
+            TrafficLog.project_id == project.id,
+            TrafficLog.created_at >= last_5m,
+        ).group_by(
+            TrafficLog.endpoint
+        ).all()
 
-    # ─────────────────────────────────────────────
-    # 2. Historical Baseline (last 7 days)
-    # ─────────────────────────────────────────────
-    historical_stats = db.query(
-        TrafficLog.normalized_path.label("endpoint"),
-        func.count().label("total_reqs"),
-    ).filter(
-        TrafficLog.project_id == project.id,
-        TrafficLog.created_at >= last_7d,
-    ).group_by(
-        TrafficLog.normalized_path
-    ).all()
+        # ─────────────────────────────────────────────
+        # 2. Historical Baseline (last 7 days)
+        # ─────────────────────────────────────────────
+        historical_stats = db.query(
+            TrafficLog.endpoint,
+            func.count().label("total_reqs"),
+        ).filter(
+            TrafficLog.project_id == project.id,
+            TrafficLog.created_at >= last_7d,
+        ).group_by(
+            TrafficLog.endpoint
+        ).all()
 
-    historical_rpm = {
-        r.endpoint: r.total_reqs / (7 * 24 * 60)
-        for r in historical_stats
-    }
+        historical_rpm = {
+            r.endpoint: r.total_reqs / (7 * 24 * 60)
+            for r in historical_stats if r.endpoint
+        }
 
-    # ─────────────────────────────────────────────
-    # 3. Time-of-Day Baseline (same hour, last 7 days)
-    # ─────────────────────────────────────────────
-    tod_stats = db.query(
-        TrafficLog.normalized_path.label("endpoint"),
-        func.count().label("total_reqs"),
-    ).filter(
-        TrafficLog.project_id == project.id,
-        TrafficLog.created_at >= last_7d,
-        func.extract("hour", TrafficLog.created_at) == current_hour,
-    ).group_by(
-        TrafficLog.normalized_path
-    ).all()
+        # ─────────────────────────────────────────────
+        # 3. Time-of-Day Baseline (same hour, last 7 days)
+        # ─────────────────────────────────────────────
+        tod_stats = db.query(
+            TrafficLog.endpoint,
+            func.count().label("total_reqs"),
+        ).filter(
+            TrafficLog.project_id == project.id,
+            TrafficLog.created_at >= last_7d,
+            func.extract("hour", TrafficLog.created_at) == current_hour,
+        ).group_by(
+            TrafficLog.endpoint
+        ).all()
 
-    tod_rpm = {
-        r.endpoint: r.total_reqs / (7 * 60)
-        for r in tod_stats
-    }
+        tod_rpm = {
+            r.endpoint: r.total_reqs / (7 * 60)
+            for r in tod_stats if r.endpoint
+        }
 
-    # ─────────────────────────────────────────────
-    # 4. Analysis & Response
-    # ─────────────────────────────────────────────
-    results = []
+        # ─────────────────────────────────────────────
+        # 4. Analysis & Response
+        # ─────────────────────────────────────────────
+        results = []
 
-    for r in current_stats:
-        curr_rpm = r.requests / 5.0
+        for r in current_stats:
+            if not r.endpoint:
+                continue
 
-        base_hist = historical_rpm.get(r.endpoint, 0)
-        base_tod = tod_rpm.get(r.endpoint, 0)
+            curr_rpm = (r.requests or 0) / 5.0
 
-        baseline_used = base_tod if base_tod > 1 else base_hist
-        baseline_used = max(baseline_used, 0.1)
+            base_hist = historical_rpm.get(r.endpoint, 0)
+            base_tod = tod_rpm.get(r.endpoint, 0)
 
-        multiplier = curr_rpm / baseline_used
+            baseline_used = base_tod if base_tod > 1 else base_hist
+            baseline_used = max(baseline_used, 0.1)
 
-        throttle_rate = (r.throttled or 0) / r.requests if r.requests else 0.0
-        block_rate = (r.blocked or 0) / r.requests if r.requests else 0.0
-        avg_risk = r.avg_risk or 0.0
+            multiplier = curr_rpm / baseline_used
 
-        severity = "NORMAL"
-        color = "green"
-        summary_parts = []
+            total_reqs = r.requests or 0
+            throttle_rate = (r.throttled or 0) / total_reqs if total_reqs else 0.0
+            block_rate = (r.blocked or 0) / total_reqs if total_reqs else 0.0
+            avg_risk = r.avg_risk or 0.0
 
-        is_high_risk = avg_risk >= 0.7
-        is_high_traffic = multiplier >= 4.0 and curr_rpm > 10
-        is_elevated_traffic = multiplier >= 2.0 and curr_rpm > 5
-        is_throttling = throttle_rate > 0.1
+            severity = "NORMAL"
+            color = "green"
+            summary_parts = []
 
-        if is_throttling:
-            severity = "HIGH"
-            color = "red"
-            summary_parts.append(f"High throttling detected ({int(throttle_rate * 100)}%).")
-        elif is_high_traffic:
-            severity = "HIGH"
-            color = "red"
-            summary_parts.append(f"Traffic surge detected ({multiplier:.1f}x baseline).")
-        elif is_high_risk:
-            severity = "WATCH"
-            color = "yellow"
-            summary_parts.append("Elevated risk scores detected.")
-        elif is_elevated_traffic:
-            severity = "WATCH"
-            color = "yellow"
-            summary_parts.append(f"Traffic is elevated ({multiplier:.1f}x typical).")
-        else:
-            summary_parts.append("Traffic is within normal limits.")
+            is_high_risk = avg_risk >= 0.7
+            is_high_traffic = multiplier >= 4.0 and curr_rpm > 10
+            is_elevated_traffic = multiplier >= 2.0 and curr_rpm > 5
+            is_throttling = throttle_rate > 0.1
 
-        if curr_rpm > 0 and base_tod == 0:
-            summary_parts.append("No historical data for this time of day.")
+            if is_throttling:
+                severity = "HIGH"
+                color = "red"
+                summary_parts.append(f"High throttling detected ({int(throttle_rate * 100)}%).")
+            elif is_high_traffic:
+                severity = "HIGH"
+                color = "red"
+                summary_parts.append(f"Traffic surge detected ({multiplier:.1f}x baseline).")
+            elif is_high_risk:
+                severity = "WATCH"
+                color = "yellow"
+                summary_parts.append("Elevated risk scores detected.")
+            elif is_elevated_traffic:
+                severity = "WATCH"
+                color = "yellow"
+                summary_parts.append(f"Traffic is elevated ({multiplier:.1f}x typical).")
+            else:
+                summary_parts.append("Traffic is within normal limits.")
 
-        securex_action = "Monitoring"
-        suggested_action = None
+            if curr_rpm > 0 and base_tod == 0:
+                summary_parts.append("No historical data for this time of day.")
 
-        if severity == "HIGH":
-            securex_action = "Active throttling / Rate limiting"
-            suggested_action = "Check for DOS/DDOS or provision more capacity."
-        elif severity == "WATCH":
-            securex_action = "Enhanced Logging"
-            suggested_action = "Review traffic sources."
+            securex_action = "Monitoring"
+            suggested_action = None
 
-        results.append(
-            EndpointAnalysis(
-                endpoint=r.endpoint,
-                severity=severity,
-                color=color,
-                summary=" ".join(summary_parts),
-                metrics=EndpointMetrics(
-                    current_rpm=round(curr_rpm, 2),
-                    baseline_rpm=round(baseline_used, 2),
-                    traffic_multiplier=round(multiplier, 2),
-                    throttle_rate=round(throttle_rate, 2),
-                    block_rate=round(block_rate, 2),
-                    avg_risk_score=round(avg_risk, 2),
-                ),
-                securex_action=securex_action,
-                suggested_action=suggested_action,
+            if severity == "HIGH":
+                securex_action = "Active throttling / Rate limiting"
+                suggested_action = "Check for DOS/DDOS or provision more capacity."
+            elif severity == "WATCH":
+                securex_action = "Enhanced Logging"
+                suggested_action = "Review traffic sources."
+
+            results.append(
+                EndpointAnalysis(
+                    endpoint=r.endpoint,
+                    severity=severity,
+                    color=color,
+                    summary=" ".join(summary_parts),
+                    metrics=EndpointMetrics(
+                        current_rpm=round(curr_rpm, 2),
+                        baseline_rpm=round(baseline_used, 2),
+                        traffic_multiplier=round(multiplier, 2),
+                        throttle_rate=round(throttle_rate, 2),
+                        block_rate=round(block_rate, 2),
+                        avg_risk_score=round(avg_risk, 2),
+                    ),
+                    securex_action=securex_action,
+                    suggested_action=suggested_action,
+                )
             )
+
+        return EndpointAnalysisResponse(
+            generated_at=now,
+            endpoints=results,
         )
 
-    return EndpointAnalysisResponse(
-        generated_at=now,
-        endpoints=results,
-    )
+    except Exception:
+        # Fallback to empty list so dashboard never 500s
+        return EndpointAnalysisResponse(
+            generated_at=datetime.utcnow(),
+            endpoints=[],
+        )

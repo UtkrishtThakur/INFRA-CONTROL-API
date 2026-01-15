@@ -88,7 +88,7 @@ class TrafficLog(Base):
     )
 
     # ───────────── CORE ROUTING ─────────────
-    normalized_path = Column(String, nullable=False, index=True)  # ✅ CANONICAL
+    endpoint = Column(String, nullable=False, index=True)  # ✅ REAL DB COLUMN
     method = Column(String, nullable=False)
 
     # ───────────── REQUEST CONTEXT ─────────────
@@ -108,8 +108,8 @@ class TrafficLog(Base):
 
     # ───────────── BACKWARD COMPAT (SAFE) ─────────────
     @property
-    def endpoint(self) -> str:
+    def normalized_path(self) -> str:
         """
-        Backward compatibility for old queries / serializers.
+        Backward compatibility: alias for endpoint.
         """
-        return self.normalized_path
+        return self.endpoint
