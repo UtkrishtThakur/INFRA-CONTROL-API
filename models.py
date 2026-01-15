@@ -66,25 +66,50 @@ class Domain(Base):
 
 class TrafficLog(Base):
     """
-    Immutable request facts emitted by the worker.
+    Immutable request facts emitted by the SecureX worker.
     """
 
     __tablename__ = "traffic_logs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
 
-    api_key_id = Column(UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="SET NULL"), index=True)
+    project_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
 
-    ip = Column(String, nullable=False, index=True)
-    path = Column(String, nullable=False)
-    endpoint = Column(String, nullable=False, index=True)
+    api_key_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("api_keys.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+
+    # ───────────── CORE ROUTING ─────────────
+    normalized_path = Column(String, nullable=False, index=True)  # ✅ CANONICAL
     method = Column(String, nullable=False)
 
+    # ───────────── REQUEST CONTEXT ─────────────
+    ip = Column(String, nullable=False, index=True)
     status_code = Column(Integer, nullable=False)
-    decision = Column(String, nullable=False)  # ALLOW | THROTTLE | BLOCK
 
+    # ───────────── SECURITY SIGNALS ─────────────
+    decision = Column(String, nullable=False)  # ALLOW | THROTTLE | BLOCK
     risk_score = Column(Integer)
     latency_ms = Column(Integer)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
+
+    # ───────────── BACKWARD COMPAT (SAFE) ─────────────
+    @property
+    def endpoint(self) -> str:
+        """
+        Backward compatibility for old queries / serializers.
+        """
+        return self.normalized_path
