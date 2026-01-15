@@ -88,7 +88,9 @@ class TrafficLog(Base):
     )
 
     # ───────────── CORE ROUTING ─────────────
+    # ───────────── CORE ROUTING ─────────────
     endpoint = Column(String, nullable=False, index=True)  # ✅ REAL DB COLUMN
+    path = Column(String, nullable=False)                  # ✅ RAW PATH
     method = Column(String, nullable=False)
 
     # ───────────── REQUEST CONTEXT ─────────────

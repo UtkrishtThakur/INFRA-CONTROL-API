@@ -128,3 +128,19 @@ class EndpointAnalysis(BaseModel):
 class EndpointAnalysisResponse(BaseModel):
     generated_at: datetime
     endpoints: List[EndpointAnalysis]
+
+
+class TrafficLogIngest(BaseModel):
+    project_id: UUID
+    api_key_hash: Optional[str] = None  # The worker sends this as string or null
+    method: str
+    path: str
+    normalized_path: Optional[str] = None
+    ip: str
+    user_agent: Optional[str] = None
+    risk_score: Optional[float] = None
+    decision: str  # "ALLOW" | "THROTTLE" | "BLOCK"
+    status_code: int
+    latency_ms: int
+    timestamp: Optional[datetime] = None
+
