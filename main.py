@@ -10,6 +10,7 @@ from keys import router as keys_router
 from metrics import router as metrics_router
 from domains import router as domains_router
 from worker import router as worker_router
+from worker import traffic_router
 
 # =========================
 # Lifespan (startup / shutdown)
@@ -70,6 +71,7 @@ app.include_router(domains_router)   # /projects/{id}/domains
 app.include_router(keys_router)      # /projects/{id}/keys
 app.include_router(metrics_router)   # /projects/{id}/metrics
 app.include_router(worker_router)    # /internal/worker
+app.include_router(traffic_router)   # /internal/traffic
     
 
 # =========================
