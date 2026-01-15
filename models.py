@@ -40,21 +40,29 @@ class APIKey(Base):
     __tablename__ = "api_keys"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    project_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        index=True,
+    )
 
     key_hash = Column(String, nullable=False, index=True)
-    label = Column(String, nullable=True)
+    label = Column(String)
 
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True))
 
 
 class Domain(Base):
     __tablename__ = "domains"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    project_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        index=True,
+    )
 
     hostname = Column(String, unique=True, nullable=False, index=True)
     verification_token = Column(String, nullable=False)
@@ -66,7 +74,8 @@ class Domain(Base):
 
 class TrafficLog(Base):
     """
-    Immutable request facts emitted by the SecureX worker.
+    Immutable request facts emitted by SecureX worker.
+    DB schema is authoritative.
     """
 
     __tablename__ = "traffic_logs"
@@ -76,28 +85,26 @@ class TrafficLog(Base):
     project_id = Column(
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
-        index=True,
         nullable=False,
+        index=True,
     )
 
     api_key_id = Column(
         UUID(as_uuid=True),
         ForeignKey("api_keys.id", ondelete="SET NULL"),
         index=True,
-        nullable=True,
     )
 
-    # ───────────── CORE ROUTING ─────────────
-    # ───────────── CORE ROUTING ─────────────
-    endpoint = Column(String, nullable=False, index=True)  # ✅ REAL DB COLUMN
-    path = Column(String, nullable=False)                  # ✅ RAW PATH
+    # ───── ROUTING ─────
+    endpoint = Column(String, nullable=False, index=True)  # canonical
+    path = Column(String, nullable=False)
     method = Column(String, nullable=False)
 
-    # ───────────── REQUEST CONTEXT ─────────────
+    # ───── CONTEXT ─────
     ip = Column(String, nullable=False, index=True)
     status_code = Column(Integer, nullable=False)
 
-    # ───────────── SECURITY SIGNALS ─────────────
+    # ───── SECURITY ─────
     decision = Column(String, nullable=False)  # ALLOW | THROTTLE | BLOCK
     risk_score = Column(Integer)
     latency_ms = Column(Integer)
@@ -108,10 +115,11 @@ class TrafficLog(Base):
         index=True,
     )
 
-    # ───────────── BACKWARD COMPAT (SAFE) ─────────────
+    # ───── SAFE BACKWARD COMPAT (NO SQL USE) ─────
     @property
     def normalized_path(self) -> str:
         """
-        Backward compatibility: alias for endpoint.
+        Alias for legacy code paths.
+        NEVER used in queries.
         """
         return self.endpoint
