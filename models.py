@@ -7,6 +7,8 @@ from sqlalchemy.orm import relationship
 from db import Base
 
 
+# ───────────────── USERS ─────────────────
+
 class User(Base):
     __tablename__ = "users"
 
@@ -16,6 +18,8 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+# ───────────────── PROJECTS ─────────────────
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -24,7 +28,7 @@ class Project(Base):
 
     owner_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("users.id"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -36,13 +40,17 @@ class Project(Base):
     traffic_logs = relationship("TrafficLog", cascade="all, delete-orphan")
 
 
+# ───────────────── API KEYS ─────────────────
+
 class APIKey(Base):
     __tablename__ = "api_keys"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
     project_id = Column(
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
         index=True,
     )
 
@@ -54,13 +62,17 @@ class APIKey(Base):
     revoked_at = Column(DateTime(timezone=True))
 
 
+# ───────────────── DOMAINS ─────────────────
+
 class Domain(Base):
     __tablename__ = "domains"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
     project_id = Column(
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
         index=True,
     )
 
@@ -72,10 +84,15 @@ class Domain(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+# ───────────────── TRAFFIC LOGS (CRITICAL) ─────────────────
+
 class TrafficLog(Base):
     """
     Immutable request facts emitted by SecureX worker.
-    DB schema is authoritative.
+
+    IMPORTANT:
+    - DB schema is authoritative
+    - This model MUST match the database exactly
     """
 
     __tablename__ = "traffic_logs"
@@ -96,15 +113,15 @@ class TrafficLog(Base):
     )
 
     # ───── ROUTING ─────
-    endpoint = Column(String, nullable=False, index=True)  # canonical
-    path = Column(String, nullable=False)
+    endpoint = Column(String, nullable=False, index=True)   # canonical path
+    path = Column(String, nullable=False)                   # raw path
     method = Column(String, nullable=False)
 
-    # ───── CONTEXT ─────
+    # ───── REQUEST CONTEXT ─────
     ip = Column(String, nullable=False, index=True)
     status_code = Column(Integer, nullable=False)
 
-    # ───── SECURITY ─────
+    # ───── SECURITY SIGNALS ─────
     decision = Column(String, nullable=False)  # ALLOW | THROTTLE | BLOCK
     risk_score = Column(Integer)
     latency_ms = Column(Integer)
@@ -115,11 +132,11 @@ class TrafficLog(Base):
         index=True,
     )
 
-    # ───── SAFE BACKWARD COMPAT (NO SQL USE) ─────
+    # ───── BACKWARD COMPAT (NO SQL USE) ─────
     @property
     def normalized_path(self) -> str:
         """
-        Alias for legacy code paths.
+        Legacy alias for old code.
         NEVER used in queries.
         """
         return self.endpoint
