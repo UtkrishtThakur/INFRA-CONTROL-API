@@ -1,3 +1,11 @@
+"""
+Metrics & Analytics endpoints for SecureX Control API.
+
+SCHEMA ALIGNMENT:
+- All queries use TrafficLog.endpoint (DB column) for grouping/filtering
+- 'endpoint' is the canonical, normalized path
+- NEVER use 'normalized_path' in SQL queries (it's a read-only property alias)
+"""
 from datetime import datetime, timedelta
 from uuid import UUID
 

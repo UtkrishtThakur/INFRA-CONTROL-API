@@ -131,11 +131,18 @@ class EndpointAnalysisResponse(BaseModel):
 
 
 class TrafficLogIngest(BaseModel):
+    """
+    Traffic log ingestion schema.
+    
+    IMPORTANT: 'endpoint' is the canonical, normalized path stored in DB.
+               'path' is the raw request path.
+               DB column is 'endpoint', not 'normalized_path'.
+    """
     project_id: UUID
     api_key_hash: Optional[str] = None  # The worker sends this as string or null
     method: str
     path: str
-    normalized_path: Optional[str] = None
+    endpoint: Optional[str] = None  # Canonical/normalized path (DB column name)
     ip: str
     user_agent: Optional[str] = None
     risk_score: Optional[float] = None
