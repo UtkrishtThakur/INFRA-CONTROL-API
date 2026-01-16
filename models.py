@@ -136,7 +136,12 @@ class TrafficLog(Base):
     @property
     def normalized_path(self) -> str:
         """
-        Legacy alias for old code.
-        NEVER used in queries.
+        **DEPRECATED**: Backward-compatibility alias only.
+        
+        WARNING: NEVER use this property in SQL queries, filters, or GROUP BY.
+        The actual DB column is 'endpoint' (line 116).
+        
+        This property exists ONLY for legacy code compatibility.
+        Always use TrafficLog.endpoint in queries.
         """
         return self.endpoint
