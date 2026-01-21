@@ -84,6 +84,56 @@ class Domain(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+
+# ───────────────── ENDPOINTS (METADATA) ─────────────────
+
+class Endpoint(Base):
+    __tablename__ = "endpoints"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    project_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    method = Column(String, nullable=False)
+    pattern = Column(String, nullable=False)  # e.g. "/api/users/:id"
+    
+    first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    buckets = relationship("MetricBucket", cascade="all, delete-orphan")
+
+
+# ───────────────── METRIC BUCKETS (HISTORY) ─────────────────
+
+class MetricBucket(Base):
+    __tablename__ = "metric_buckets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    endpoint_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("endpoints.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Time bucket (e.g. hourly start time)
+    bucket_start = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    request_count = Column(Integer, default=0)
+    error_count = Column(Integer, default=0)
+    latency_sum = Column(Integer, default=0)
+    risk_score_sum = Column(Integer, default=0)
+    
+    throttled_count = Column(Integer, default=0)
+    blocked_count = Column(Integer, default=0)
+
+
 # ───────────────── TRAFFIC LOGS (CRITICAL) ─────────────────
 
 class TrafficLog(Base):

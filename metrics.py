@@ -9,13 +9,16 @@ SCHEMA ALIGNMENT:
 from datetime import datetime, timedelta
 from uuid import UUID
 
+from datetime import datetime, timedelta
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, Integer
+from sqlalchemy import func, Integer, extract
 from sqlalchemy.orm import Session
 
 from db import get_db
 from auth import get_current_user
-from models import TrafficLog, Project, User
+from models import TrafficLog, Project, User, Endpoint, MetricBucket
 from schemas import EndpointAnalysisResponse, EndpointAnalysis, EndpointMetrics
 
 router = APIRouter(prefix="/projects", tags=["metrics"])
@@ -46,8 +49,26 @@ def endpoint_analysis(
         last_7d = now - timedelta(days=7)
         current_hour = now.hour
 
-        # ───── CURRENT TRAFFIC ─────
-        current = (
+        # ───── STRATEGY ─────
+        # 1. Get ALL registered endpoints (Ensures visibility even with 0 traffic)
+        # 2. Get CURRENT traffic from TrafficLogs (Real-time, last 5m)
+        # 3. Get HISTORICAL traffic from MetricBuckets (Efficient aggregation)
+
+        # 1. Endpoint Registry
+        endpoints = (
+            db.query(Endpoint)
+            .filter(Endpoint.project_id == project.id)
+            .all()
+        )
+        
+        # Map endpoint pattern -> Endpoint Object
+        endpoint_map = {e.pattern: e for e in endpoints}
+        # Map endpoint ID -> pattern
+        id_to_pattern = {e.id: e.pattern for e in endpoints}
+
+        # 2. Current Traffic (Last 5m)
+        # We still use TrafficLog for "live" high-res data
+        current_data = (
             db.query(
                 TrafficLog.endpoint,
                 func.count().label("requests"),
@@ -62,59 +83,92 @@ def endpoint_analysis(
             .group_by(TrafficLog.endpoint)
             .all()
         )
+        
+        # Convert to dictionary for O(1) lookup
+        # Key: pattern (str)
+        curr_stats = {}
+        for row in current_data:
+            curr_stats[row.endpoint] = {
+                "requests": row.requests or 0,
+                "avg_risk": row.avg_risk or 0,
+                "throttled": row.throttled or 0,
+                "blocked": row.blocked or 0
+            }
 
-        # ───── HISTORICAL BASELINE ─────
-        hist = (
+        # 3. Historical Baseline (Metric Buckets)
+        # Global Average (Last 7d)
+        hist_data = (
             db.query(
-                TrafficLog.endpoint,
-                func.count().label("total"),
+                MetricBucket.endpoint_id,
+                func.sum(MetricBucket.request_count).label("total_reqs")
             )
+            .join(Endpoint)
             .filter(
-                TrafficLog.project_id == project.id,
-                TrafficLog.created_at >= last_7d,
+                Endpoint.project_id == project.id,
+                MetricBucket.bucket_start >= last_7d
             )
-            .group_by(TrafficLog.endpoint)
+            .group_by(MetricBucket.endpoint_id)
+            .all()
+        )
+        
+        hist_rpm_map = {}
+        minutes_in_7d = 7 * 24 * 60
+        for row in hist_data:
+            pattern = id_to_pattern.get(row.endpoint_id)
+            if pattern:
+                hist_rpm_map[pattern] = (row.total_reqs or 0) / minutes_in_7d
+
+        # Time-of-Day Baseline (Same hour, Last 7d)
+        tod_data = (
+            db.query(
+                MetricBucket.endpoint_id,
+                func.sum(MetricBucket.request_count).label("total_reqs")
+            )
+            .join(Endpoint)
+            .filter(
+                Endpoint.project_id == project.id,
+                MetricBucket.bucket_start >= last_7d,
+                extract('hour', MetricBucket.bucket_start) == current_hour
+            )
+            .group_by(MetricBucket.endpoint_id)
             .all()
         )
 
-        hist_rpm = {r.endpoint: r.total / (7 * 24 * 60) for r in hist if r.endpoint}
+        tod_rpm_map = {}
+        minutes_in_tod = 7 * 60  # 7 days * 60 mins per hour slot
+        for row in tod_data:
+            pattern = id_to_pattern.get(row.endpoint_id)
+            if pattern:
+                tod_rpm_map[pattern] = (row.total_reqs or 0) / minutes_in_tod
 
-        # ───── TIME-OF-DAY BASELINE ─────
-        tod = (
-            db.query(
-                TrafficLog.endpoint,
-                func.count().label("total"),
-            )
-            .filter(
-                TrafficLog.project_id == project.id,
-                TrafficLog.created_at >= last_7d,
-                func.extract("hour", TrafficLog.created_at) == current_hour,
-            )
-            .group_by(TrafficLog.endpoint)
-            .all()
-        )
-
-        tod_rpm = {r.endpoint: r.total / (7 * 60) for r in tod if r.endpoint}
-
+        # ───── ASSEMBLE RESULTS ─────
         results = []
+        
+        # Iterate over ALL registered endpoints
+        for pattern, ep_obj in endpoint_map.items():
+            
+            # Current Stats
+            c = curr_stats.get(pattern, {})
+            requests = c.get("requests", 0)
+            curr_rpm = requests / 5.0  # Last 5 mins
+            
+            throttle_count = c.get("throttled", 0)
+            block_count = c.get("blocked", 0)
+            avg_risk = c.get("avg_risk", 0)
+            
+            throttle_rate = throttle_count / requests if requests else 0.0
+            block_rate = block_count / requests if requests else 0.0
 
-        for r in current:
-            endpoint = r.endpoint
-            if not endpoint:
-                continue
+            # Baselines
+            # Prefer Time-of-Day, fallback to Global Avg, fallback to 0
+            base_rpm = tod_rpm_map.get(pattern, hist_rpm_map.get(pattern, 0))
+            
+            # Avoid division by zero or tiny baselines causing huge multipliers
+            base_rpm = max(base_rpm, 0.1) 
+            
+            multiplier = curr_rpm / base_rpm
 
-            requests = r.requests or 0
-            curr_rpm = requests / 5.0
-
-            base = tod_rpm.get(endpoint, hist_rpm.get(endpoint, 0))
-            base = max(base, 0.1)
-
-            multiplier = curr_rpm / base
-
-            throttle_rate = (r.throttled or 0) / requests if requests else 0
-            block_rate = (r.blocked or 0) / requests if requests else 0
-            avg_risk = r.avg_risk or 0
-
+            # Intelligence / Severity Logic
             severity = "NORMAL"
             color = "green"
             notes = []
@@ -131,18 +185,22 @@ def endpoint_analysis(
             elif multiplier >= 2 and curr_rpm > 5:
                 severity, color = "WATCH", "yellow"
                 notes.append(f"Traffic elevated ({multiplier:.1f}x).")
-            else:
-                notes.append("Traffic within normal range.")
+            
+            if not notes:
+                if requests == 0:
+                    notes.append("No active traffic.")
+                else:
+                    notes.append("Traffic within normal range.")
 
             results.append(
                 EndpointAnalysis(
-                    endpoint=endpoint,
+                    endpoint=pattern,
                     severity=severity,
                     color=color,
                     summary=" ".join(notes),
                     metrics=EndpointMetrics(
                         current_rpm=round(curr_rpm, 2),
-                        baseline_rpm=round(base, 2),
+                        baseline_rpm=round(base_rpm, 2),
                         traffic_multiplier=round(multiplier, 2),
                         throttle_rate=round(throttle_rate, 2),
                         block_rate=round(block_rate, 2),
@@ -157,6 +215,7 @@ def endpoint_analysis(
 
     except Exception:
         # HARD FAIL-SAFE — NEVER break dashboard
+        # Log this in production
         return EndpointAnalysisResponse(
             generated_at=datetime.utcnow(),
             endpoints=[],

@@ -53,27 +53,32 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from datetime import datetime, timedelta
+import logging
+
+from schemas import TrafficLogIngest
+from models import Project, Endpoint, MetricBucket
+from utils import normalize_path
+
+logger = logging.getLogger(__name__)
+
 @traffic_router.post("/traffic", dependencies=[Depends(verify_worker_secret)])
 def ingest_traffic_v2(payload: TrafficLogIngest, db: Session = Depends(get_db)):
     """
-    Production-safe traffic ingestion.
+    Production-safe traffic ingestion v2.
     
-    GUARANTEES:
-    - Never returns 500
-    - Logs errors but swallows exceptions
-    - Always returns 200 with status indicator
-    
-    SCHEMA ALIGNMENT:
-    - Uses 'endpoint' field (canonical path) matching DB column
-    - Falls back to 'path' if endpoint not provided
+    Includes:
+    - Path Normalization
+    - Endpoint Registry Upsert
+    - Time-Bucket Aggregation
+    - Raw Logging
     """
     try:
-        # ───── 1. Determine canonical endpoint ─────
-        # 'endpoint' is normalized/canonical path stored in DB
-        # 'path' is raw request path
-        # If worker didn't provide endpoint, use raw path as fallback
-        final_endpoint = payload.endpoint or payload.path
-
+        # ───── 1. Normalize Path ─────
+        # If worker sent 'endpoint', trust it (maybe). But here we enforce our own normalization 
+        # to ensure consistency.
+        normalized_pattern = normalize_path(payload.path)
+        
         # ───── 2. Resolve API Key ID (if hash provided) ─────
         api_key_id = None
         if payload.api_key_hash:
@@ -84,39 +89,92 @@ def ingest_traffic_v2(payload: TrafficLogIngest, db: Session = Depends(get_db)):
                 if key_obj:
                     api_key_id = key_obj.id
             except Exception as lookup_err:
-                # If lookup fails, continue without linking key
                 logger.warning(f"API key lookup failed: {lookup_err}")
 
-        # ───── 3. Create Traffic Log Record ─────
+        # ───── 3. Endpoint Registry Ingestion ─────
+        # Check if endpoint exists
+        endpoint_obj = db.query(Endpoint).filter(
+            Endpoint.project_id == payload.project_id,
+            Endpoint.method == payload.method,
+            Endpoint.pattern == normalized_pattern
+        ).first()
+
+        if not endpoint_obj:
+            # Create new endpoint
+            endpoint_obj = Endpoint(
+                project_id=payload.project_id,
+                method=payload.method,
+                pattern=normalized_pattern,
+                first_seen_at=datetime.utcnow(),
+                last_seen_at=datetime.utcnow()
+            )
+            db.add(endpoint_obj)
+            db.flush()  # to get ID
+        else:
+            # Update last_seen
+            endpoint_obj.last_seen_at = datetime.utcnow()
+
+        # ───── 4. Update Metric Bucket (Aggregation) ─────
+        # Bucket by hour
+        now = datetime.utcnow()
+        bucket_start = now.replace(minute=0, second=0, microsecond=0)
+        
+        bucket = db.query(MetricBucket).filter(
+            MetricBucket.endpoint_id == endpoint_obj.id,
+            MetricBucket.bucket_start == bucket_start
+        ).first()
+
+        if not bucket:
+            bucket = MetricBucket(
+                endpoint_id=endpoint_obj.id,
+                bucket_start=bucket_start,
+                request_count=0,
+                error_count=0,
+                latency_sum=0,
+                risk_score_sum=0,
+                throttled_count=0,
+                blocked_count=0
+            )
+            db.add(bucket)
+
+        # Update stats
+        bucket.request_count += 1
+        if payload.status_code >= 400:
+            bucket.error_count += 1
+        bucket.latency_sum += payload.latency_ms
+        if payload.risk_score:
+            bucket.risk_score_sum += int(payload.risk_score * 100) # Store as int if needed, or float
+        
+        if payload.decision == "THROTTLE":
+            bucket.throttled_count += 1
+        elif payload.decision == "BLOCK":
+            bucket.blocked_count += 1
+
+        # ───── 5. Raw Traffic Log ─────
         log_entry = TrafficLog(
             project_id=payload.project_id,
-            api_key_id=api_key_id,  # NULL if not found/provided
+            api_key_id=api_key_id,
             ip=payload.ip,
             path=payload.path,               # Raw path
-            endpoint=final_endpoint,         # Canonical path (DB column)
+            endpoint=normalized_pattern,     # Canonical path
             method=payload.method,
             status_code=payload.status_code,
             decision=payload.decision,
             risk_score=payload.risk_score,
             latency_ms=payload.latency_ms,
-            # created_at defaults to now() in DB
         )
 
         db.add(log_entry)
         db.commit()
         
-        return {"status": "ingested"}
+        return {"status": "ingested", "normalized": normalized_pattern}
 
     except Exception as e:
-        # ───── PRODUCTION SAFETY: NEVER CRASH ─────
-        # Rollback transaction to prevent partial writes
+        # ───── PRODUCTION SAFETY ─────
         try:
             db.rollback()
         except:
             pass
         
-        # Log error for debugging (use structured logging in production)
         logger.error(f"Traffic ingestion failed: {e}", exc_info=True)
-        
-        # Return success status to prevent worker retries
         return {"status": "error_ignored", "error": str(e)}
