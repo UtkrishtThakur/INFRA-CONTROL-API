@@ -1,16 +1,14 @@
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr
 
+# =========================
+# Auth Schemas
+# =========================
 
 class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
@@ -18,11 +16,24 @@ class UserLogin(BaseModel):
 class UserOut(BaseModel):
     id: UUID
     email: EmailStr
+    is_verified: bool
     created_at: datetime
 
     class Config:
         from_attributes = True
 
+
+class RegisterResponse(BaseModel):
+    message: str
+
+
+class EmailVerificationResponse(BaseModel):
+    message: str
+
+
+# =========================
+# Project Schemas
+# =========================
 
 class ProjectCreate(BaseModel):
     name: str
@@ -39,28 +50,40 @@ class ProjectOut(BaseModel):
         from_attributes = True
 
 
+# =========================
+# API Key Schemas
+# =========================
+
 class APIKeyCreate(BaseModel):
     label: Optional[str] = None
 
 
 class APIKeyToken(BaseModel):
-    """Returned ONLY once upon creation"""
+    """
+    Returned ONLY once upon creation
+    """
     id: UUID
     label: Optional[str]
     api_key: str
     created_at: datetime
 
+
 class APIKeyOut(BaseModel):
-    """Safe representation of an API Key (no raw secret)"""
+    """
+    Safe representation of an API Key (no raw secret)
+    """
     id: UUID
     label: Optional[str]
     is_active: bool
     created_at: datetime
-    # NO RAW KEY HERE
 
     class Config:
         from_attributes = True
 
+
+# =========================
+# Domain Schemas
+# =========================
 
 class DomainCreate(BaseModel):
     hostname: str
@@ -96,7 +119,8 @@ class WorkerProjectConfig(BaseModel):
     id: UUID
     upstream_url: str
     domains: List[str]
-    api_keys: List[str]  # List of HASHES
+    api_keys: List[str]  # HASHES only
+
 
 class WorkerConfigOut(BaseModel):
     projects: List[WorkerProjectConfig]
@@ -117,9 +141,9 @@ class EndpointMetrics(BaseModel):
 
 class EndpointAnalysis(BaseModel):
     endpoint: str
-    severity: str        # "NORMAL", "WATCH", "HIGH"
-    color: str           # "green", "yellow", "red"
-    summary: str         # Human-readable sentence
+    severity: str        # NORMAL | WATCH | HIGH
+    color: str           # green | yellow | red
+    summary: str
     metrics: EndpointMetrics
     securex_action: str
     suggested_action: Optional[str]
@@ -130,24 +154,26 @@ class EndpointAnalysisResponse(BaseModel):
     endpoints: List[EndpointAnalysis]
 
 
+# =========================
+# Traffic Logs
+# =========================
+
 class TrafficLogIngest(BaseModel):
     """
     Traffic log ingestion schema.
-    
-    IMPORTANT: 'endpoint' is the canonical, normalized path stored in DB.
-               'path' is the raw request path.
-               DB column is 'endpoint', not 'normalized_path'.
+
+    'endpoint' is the canonical normalized path stored in DB.
+    'path' is the raw request path.
     """
     project_id: UUID
-    api_key_hash: Optional[str] = None  # The worker sends this as string or null
+    api_key_hash: Optional[str] = None
     method: str
     path: str
-    endpoint: Optional[str] = None  # Canonical/normalized path (DB column name)
+    endpoint: Optional[str] = None
     ip: str
     user_agent: Optional[str] = None
     risk_score: Optional[float] = None
-    decision: str  # "ALLOW" | "THROTTLE" | "BLOCK"
+    decision: str              # ALLOW | THROTTLE | BLOCK
     status_code: int
     latency_ms: int
     timestamp: Optional[datetime] = None
-

@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     REDIS_URL: Optional[str] = None
 
     # =========================
+    # Email (Resend)
+    # =========================
+    RESEND_API_KEY: str
+    EMAIL_FROM: str
+    FRONTEND_URL: str
+
+    # =========================
     # Auth
     # =========================
     JWT_SECRET_KEY: str

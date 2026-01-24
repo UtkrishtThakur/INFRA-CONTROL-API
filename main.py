@@ -72,7 +72,6 @@ app.include_router(keys_router)      # /projects/{id}/keys
 app.include_router(metrics_router)   # /projects/{id}/metrics
 app.include_router(worker_router)    # /internal/worker
 app.include_router(traffic_router)   # /internal/traffic
-    
 
 # =========================
 # Health Check
