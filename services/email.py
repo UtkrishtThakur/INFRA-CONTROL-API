@@ -18,6 +18,8 @@ def send_email(to_email: str, subject: str, html_content: str):
         email = resend.Emails.send(params)
         return email
     except Exception as e:
-        # In production, use proper logging
-        print(f"Failed to send email: {e}")
+        print(f"CRITICAL: Email sending failed!")
+        print(f"Error: {e}")
+        print(f"From: {params['from']}")
+        print(f"To: {params['to']}")
         return None
