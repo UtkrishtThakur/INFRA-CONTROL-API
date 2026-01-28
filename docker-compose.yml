@@ -1,9 +1,11 @@
+version: "3.9"
+
 services:
   securex-control-api:
     build: .
     container_name: securex-control-api
+    env_file:
+      - .env
     ports:
       - "8001:8000"
-    volumes:
-      - .:/app
     restart: unless-stopped

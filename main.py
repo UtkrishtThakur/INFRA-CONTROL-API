@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import logging
 
 from config import settings
-from db import Base, engine
+from db import init_db
 from auth import router as auth_router
 from projects import router as projects_router
 from keys import router as keys_router
@@ -12,6 +13,8 @@ from domains import router as domains_router
 from worker import router as worker_router
 from worker import traffic_router
 
+logger = logging.getLogger("securex.main")
+
 # =========================
 # Lifespan (startup / shutdown)
 # =========================
@@ -19,11 +22,15 @@ from worker import traffic_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    # In production, use Alembic. For now, create tables if invalid.
-    Base.metadata.create_all(bind=engine)
+    logger.info("Starting Control API")
+    init_db()   # SAFE: does not crash app if DB is down
     yield
-    # Shutdown (nothing needed yet)
+    # Shutdown
+    logger.info("Shutting down Control API")
 
+# =========================
+# App
+# =========================
 
 app = FastAPI(
     title="Control API",
@@ -31,16 +38,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 # =========================
 # Middleware
 # =========================
-
-@app.middleware("http")
-async def log_requests(request, call_next):
-    print(f"Incoming request: {request.method} {request.url}")
-    response = await call_next(request)
-    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,18 +60,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # =========================
 # Routers
 # =========================
 
 app.include_router(auth_router)
-app.include_router(projects_router)  # /projects
-app.include_router(domains_router)   # /projects/{id}/domains
-app.include_router(keys_router)      # /projects/{id}/keys
-app.include_router(metrics_router)   # /projects/{id}/metrics
-app.include_router(worker_router)    # /internal/worker
-app.include_router(traffic_router)   # /internal/traffic
+app.include_router(projects_router)
+app.include_router(domains_router)
+app.include_router(keys_router)
+app.include_router(metrics_router)
+app.include_router(worker_router)
+app.include_router(traffic_router)
 
 # =========================
 # Health Check
