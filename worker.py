@@ -6,6 +6,7 @@ import logging
 
 from db import get_db
 from config import settings
+from utils import normalize_path
 from models import (
     Project,
     Domain,
@@ -96,9 +97,9 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
 
     try:
         # --------------------------------------------------
-        # 1. Trust worker-normalized endpoint
+        # 1. Trust worker-normalized endpoint (or fallback)
         # --------------------------------------------------
-        normalized_endpoint = payload.endpoint or payload.path
+        normalized_endpoint = payload.endpoint or normalize_path(payload.path)
 
         # --------------------------------------------------
         # 2. Resolve API Key ID (optional)
@@ -185,10 +186,13 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
         # --------------------------------------------------
         # 5. Raw Traffic Log (FULL DATA)
         # --------------------------------------------------
+        # Pydantic already parsed payload.timestamp into a datetime object
+        log_timestamp = payload.timestamp or now
+
         log = TrafficLog(
             project_id=payload.project_id,
             api_key_id=api_key_id,
-            timestamp=datetime.fromisoformat(payload.timestamp),
+            timestamp=log_timestamp,
             ip=payload.ip,
             user_agent=payload.user_agent,
             path=payload.path,
@@ -196,7 +200,7 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
             method=payload.method,
             status_code=payload.status_code,
             decision=payload.decision,
-            risk_score=payload.risk_score,
+            risk_score=int(payload.risk_score * 100) if payload.risk_score is not None else None,
             latency_ms=payload.latency_ms,
         )
 
@@ -207,5 +211,5 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
 
     except Exception as e:
         db.rollback()
-        logger.error("Traffic ingestion failed", exc_info=True)
-        return {"status": "ignored"}
+        logger.error(f"Traffic ingestion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Ingestion failed")

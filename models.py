@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Boolean, DateTime, Integer, ForeignKey
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -127,6 +127,10 @@ class Endpoint(Base):
 
     buckets = relationship("MetricBucket", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        UniqueConstraint("project_id", "method", "pattern", name="uq_endpoint_pattern"),
+    )
+
 
 # ───────────────── METRIC BUCKETS (HISTORY) ─────────────────
 
@@ -182,6 +186,8 @@ class TrafficLog(Base):
         index=True,
     )
 
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+
     # ───── ROUTING ─────
     endpoint = Column(String, nullable=False, index=True)   # canonical path
     path = Column(String, nullable=False)                   # raw path
@@ -189,6 +195,7 @@ class TrafficLog(Base):
 
     # ───── REQUEST CONTEXT ─────
     ip = Column(String, nullable=False, index=True)
+    user_agent = Column(String)
     status_code = Column(Integer, nullable=False)
 
     # ───── SECURITY SIGNALS ─────
