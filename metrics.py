@@ -3,12 +3,13 @@ Metrics & Analytics endpoints for SecureX Control API.
 
 SCHEMA ALIGNMENT:
 - TrafficLog.endpoint      -> raw path (e.g. /user/123)
-- TrafficLog.endpoint_id   -> FK to Endpoint.id
+- TrafficLog.endpoint_id   -> FK to Endpoint.id (may be NULL for legacy logs)
 - Endpoint.pattern         -> canonical pattern (e.g. /user/{id})
 
-RULE:
-- ALL aggregation must happen on endpoint_id
-- NEVER group by raw endpoint strings
+RULES:
+- Prefer aggregation by endpoint_id
+- Fallback to pattern matching on raw endpoint if endpoint_id is missing
+- NEVER let metrics disappear silently
 """
 
 from datetime import datetime, timedelta
@@ -48,6 +49,25 @@ def get_project_or_404(project_id: UUID, user: User, db: Session) -> Project:
     return project
 
 
+def normalize_fallback_path(path: str) -> str:
+    """
+    Best-effort fallback normalizer for raw paths.
+    Converts:
+      /user/123        -> /user/{id}
+      /order/9f8a...   -> /order/{id}
+    """
+    parts = path.strip("/").split("/")
+    normalized = []
+
+    for p in parts:
+        if p.isdigit() or len(p) >= 8:
+            normalized.append("{id}")
+        else:
+            normalized.append(p)
+
+    return "/" + "/".join(normalized)
+
+
 # ─────────────────────────────────────────────────────────────
 # Endpoint Analysis
 # ─────────────────────────────────────────────────────────────
@@ -70,7 +90,7 @@ def endpoint_analysis(
         current_hour = now.hour
 
         # ─────────────────────────────────────────────────
-        # 1. Endpoint Registry (authoritative source)
+        # 1. Endpoint Registry
         # ─────────────────────────────────────────────────
 
         endpoints = (
@@ -79,19 +99,20 @@ def endpoint_analysis(
             .all()
         )
 
-        # pattern -> Endpoint
         endpoint_map = {e.pattern: e for e in endpoints}
-        # endpoint_id -> pattern
         id_to_pattern = {e.id: e.pattern for e in endpoints}
+
+        # Always allow fallback bucket
+        endpoint_map.setdefault("UNREGISTERED", None)
 
         # ─────────────────────────────────────────────────
         # 2. Current Traffic (last 5 minutes)
-        # AGGREGATE BY endpoint_id (NOT raw path)
         # ─────────────────────────────────────────────────
 
         current_data = (
             db.query(
                 TrafficLog.endpoint_id,
+                TrafficLog.endpoint,
                 func.count().label("requests"),
                 func.avg(TrafficLog.risk_score).label("avg_risk"),
                 func.sum(
@@ -104,29 +125,49 @@ def endpoint_analysis(
             .filter(
                 TrafficLog.project_id == project.id,
                 TrafficLog.created_at >= last_5m,
-                TrafficLog.endpoint_id.isnot(None),
             )
-            .group_by(TrafficLog.endpoint_id)
+            .group_by(TrafficLog.endpoint_id, TrafficLog.endpoint)
             .all()
         )
 
-        # pattern -> stats
         curr_stats = {}
 
         for row in current_data:
-            pattern = id_to_pattern.get(row.endpoint_id)
-            if not pattern:
-                continue
+            # Prefer registered endpoint
+            if row.endpoint_id and row.endpoint_id in id_to_pattern:
+                pattern = id_to_pattern[row.endpoint_id]
+            else:
+                # Fallback normalization
+                pattern = normalize_fallback_path(row.endpoint or "/unknown")
+                endpoint_map.setdefault(pattern, None)
 
-            curr_stats[pattern] = {
-                "requests": row.requests or 0,
-                "avg_risk": row.avg_risk or 0,
-                "throttled": row.throttled or 0,
-                "blocked": row.blocked or 0,
-            }
+            stats = curr_stats.setdefault(
+                pattern,
+                {
+                    "requests": 0,
+                    "avg_risk_sum": 0.0,
+                    "risk_count": 0,
+                    "throttled": 0,
+                    "blocked": 0,
+                },
+            )
+
+            stats["requests"] += row.requests or 0
+            if row.avg_risk is not None:
+                stats["avg_risk_sum"] += row.avg_risk * (row.requests or 1)
+                stats["risk_count"] += row.requests or 1
+            stats["throttled"] += row.throttled or 0
+            stats["blocked"] += row.blocked or 0
+
+        # Finalize avg risk
+        for stats in curr_stats.values():
+            if stats["risk_count"]:
+                stats["avg_risk"] = stats["avg_risk_sum"] / stats["risk_count"]
+            else:
+                stats["avg_risk"] = 0.0
 
         # ─────────────────────────────────────────────────
-        # 3. Historical Baseline (7-day global avg)
+        # 3. Historical Baseline (registered endpoints only)
         # ─────────────────────────────────────────────────
 
         hist_data = (
@@ -144,17 +185,14 @@ def endpoint_analysis(
         )
 
         minutes_in_7d = 7 * 24 * 60
-        hist_rpm_map = {}
-
-        for row in hist_data:
-            pattern = id_to_pattern.get(row.endpoint_id)
-            if not pattern:
-                continue
-
-            hist_rpm_map[pattern] = (row.total_reqs or 0) / minutes_in_7d
+        hist_rpm_map = {
+            id_to_pattern[row.endpoint_id]: (row.total_reqs or 0) / minutes_in_7d
+            for row in hist_data
+            if row.endpoint_id in id_to_pattern
+        }
 
         # ─────────────────────────────────────────────────
-        # 4. Time-of-Day Baseline (same hour, last 7 days)
+        # 4. Time-of-Day Baseline
         # ─────────────────────────────────────────────────
 
         tod_data = (
@@ -173,14 +211,11 @@ def endpoint_analysis(
         )
 
         minutes_in_tod = 7 * 60
-        tod_rpm_map = {}
-
-        for row in tod_data:
-            pattern = id_to_pattern.get(row.endpoint_id)
-            if not pattern:
-                continue
-
-            tod_rpm_map[pattern] = (row.total_reqs or 0) / minutes_in_tod
+        tod_rpm_map = {
+            id_to_pattern[row.endpoint_id]: (row.total_reqs or 0) / minutes_in_tod
+            for row in tod_data
+            if row.endpoint_id in id_to_pattern
+        }
 
         # ─────────────────────────────────────────────────
         # 5. Assemble Results
@@ -188,7 +223,7 @@ def endpoint_analysis(
 
         results = []
 
-        for pattern, ep_obj in endpoint_map.items():
+        for pattern in endpoint_map.keys():
             c = curr_stats.get(pattern, {})
 
             requests = c.get("requests", 0)
@@ -205,8 +240,8 @@ def endpoint_analysis(
                 pattern,
                 hist_rpm_map.get(pattern, 0),
             )
-
             base_rpm = max(base_rpm, 0.1)
+
             multiplier = curr_rpm / base_rpm
 
             severity = "NORMAL"
@@ -215,28 +250,23 @@ def endpoint_analysis(
 
             if throttle_rate > 0.1:
                 severity, color = "HIGH", "red"
-                notes.append(
-                    f"High throttling ({int(throttle_rate * 100)}%)."
-                )
+                notes.append("High throttling detected.")
             elif multiplier >= 4 and curr_rpm > 10:
                 severity, color = "HIGH", "red"
-                notes.append(
-                    f"Traffic spike ({multiplier:.1f}x baseline)."
-                )
+                notes.append("Traffic spike detected.")
             elif avg_risk >= 0.7:
                 severity, color = "WATCH", "yellow"
                 notes.append("Elevated risk scores.")
             elif multiplier >= 2 and curr_rpm > 5:
                 severity, color = "WATCH", "yellow"
-                notes.append(
-                    f"Traffic elevated ({multiplier:.1f}x)."
-                )
+                notes.append("Traffic elevated.")
 
             if not notes:
-                if requests == 0:
-                    notes.append("No active traffic.")
-                else:
-                    notes.append("Traffic within normal range.")
+                notes.append(
+                    "No active traffic."
+                    if requests == 0
+                    else "Traffic within normal range."
+                )
 
             results.append(
                 EndpointAnalysis(
@@ -271,7 +301,6 @@ def endpoint_analysis(
         )
 
     except Exception:
-        # HARD FAIL-SAFE — dashboard must never break
         return EndpointAnalysisResponse(
             generated_at=datetime.utcnow(),
             endpoints=[],
