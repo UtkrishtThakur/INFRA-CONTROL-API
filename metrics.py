@@ -44,6 +44,28 @@ def get_project_or_404(project_id: UUID, user: User, db: Session) -> Project:
     return project
 
 
+def normalize_endpoint(path: str) -> str:
+    """
+    Clubs dynamic segments together.
+
+    Examples:
+      /user/123              -> /user/{id}
+      /user/5346asdasd       -> /user/{id}
+      /order/9f8a7d6c        -> /order/{id}
+    """
+    parts = path.strip("/").split("/")
+    normalized = []
+
+    for part in parts:
+        # numbers OR long random-looking strings
+        if part.isdigit() or len(part) > 8:
+            normalized.append("{id}")
+        else:
+            normalized.append(part)
+
+    return "/" + "/".join(normalized)
+
+
 # ─────────────────────────────────────────────────────────────
 # Endpoint Analysis
 # ─────────────────────────────────────────────────────────────
@@ -65,31 +87,17 @@ def endpoint_analysis(
         last_7d = now - timedelta(days=7)
         current_hour = now.hour
 
-        # ───── STRATEGY ─────
-        # 1. Get ALL registered endpoints (ensures visibility even with 0 traffic)
-        # 2. Get CURRENT traffic from TrafficLogs (last 5 minutes)
-        # 3. Get HISTORICAL traffic from MetricBuckets (aggregated)
-
-        # ─────────────────────────────────────────────
         # 1. Endpoint Registry
-        # ─────────────────────────────────────────────
-
         endpoints = (
             db.query(Endpoint)
             .filter(Endpoint.project_id == project.id)
             .all()
         )
 
-        # pattern -> Endpoint
         endpoint_map = {e.pattern: e for e in endpoints}
-
-        # endpoint_id -> pattern
         id_to_pattern = {e.id: e.pattern for e in endpoints}
 
-        # ─────────────────────────────────────────────
         # 2. Current Traffic (Last 5 minutes)
-        # ─────────────────────────────────────────────
-
         current_data = (
             db.query(
                 TrafficLog.endpoint,
@@ -114,17 +122,16 @@ def endpoint_analysis(
         curr_stats = {}
 
         for row in current_data:
-            curr_stats[row.endpoint] = {
+            normalized_endpoint = normalize_endpoint(row.endpoint)
+
+            curr_stats[normalized_endpoint] = {
                 "requests": row.requests or 0,
                 "avg_risk": row.avg_risk or 0,
                 "throttled": row.throttled or 0,
                 "blocked": row.blocked or 0,
             }
 
-        # ─────────────────────────────────────────────
-        # 3. Historical Baseline (7-day global average)
-        # ─────────────────────────────────────────────
-
+        # 3. Historical Baseline (unchanged)
         hist_data = (
             db.query(
                 MetricBucket.endpoint_id,
@@ -147,10 +154,7 @@ def endpoint_analysis(
             if pattern:
                 hist_rpm_map[pattern] = (row.total_reqs or 0) / minutes_in_7d
 
-        # ─────────────────────────────────────────────
-        # 4. Time-of-Day Baseline (same hour, last 7 days)
-        # ─────────────────────────────────────────────
-
+        # 4. Time-of-Day Baseline (unchanged)
         tod_data = (
             db.query(
                 MetricBucket.endpoint_id,
@@ -174,10 +178,7 @@ def endpoint_analysis(
             if pattern:
                 tod_rpm_map[pattern] = (row.total_reqs or 0) / minutes_in_tod
 
-        # ─────────────────────────────────────────────
-        # 5. Assemble Results
-        # ─────────────────────────────────────────────
-
+        # 5. Assemble Results (unchanged)
         results = []
 
         for pattern, ep_obj in endpoint_map.items():
@@ -257,7 +258,6 @@ def endpoint_analysis(
         )
 
     except Exception:
-        # HARD FAIL-SAFE — never break dashboard
         return EndpointAnalysisResponse(
             generated_at=datetime.utcnow(),
             endpoints=[],
