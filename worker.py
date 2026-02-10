@@ -6,7 +6,7 @@ import logging
 
 from db import get_db
 from config import settings
-from utils import normalize_path
+from config import settings
 from models import (
     Project,
     Domain,
@@ -99,7 +99,8 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
         # --------------------------------------------------
         # 1. Trust worker-normalized endpoint (or fallback)
         # --------------------------------------------------
-        normalized_endpoint = payload.endpoint or normalize_path(payload.path)
+        # CRITICAL: Control API must NOT normalize. Trust the worker.
+        normalized_endpoint = payload.endpoint or payload.path
 
         # --------------------------------------------------
         # 2. Resolve API Key ID (optional)
