@@ -1,15 +1,16 @@
 """
 Metrics & Analytics endpoints for SecureX Control API.
 
-RULES (DO NOT BREAK):
-- TrafficLog.endpoint is ALREADY normalized by the worker
-- Endpoint.pattern is the canonical endpoint identifier
-- NEVER normalize paths again inside analytics
-- ALWAYS aggregate by canonical endpoint
+RULES:
+- TrafficLog.endpoint may contain raw paths
+- utils.normalize_path() is the ONLY normalization source
+- Dashboard must NEVER show dynamic raw endpoints
+- All aggregation happens on normalized endpoint
 """
 
 from datetime import datetime, timedelta
 from uuid import UUID
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, Integer, extract
@@ -23,13 +24,14 @@ from schemas import (
     EndpointAnalysis,
     EndpointMetrics,
 )
+from utils import normalize_path
 
 router = APIRouter(prefix="/projects", tags=["metrics"])
 
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # Helpers
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 def get_project_or_404(
     project_id: UUID,
@@ -49,9 +51,9 @@ def get_project_or_404(
     return project
 
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # Endpoint Analysis
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 
 @router.get(
     "/{project_id}/endpoint-analysis",
@@ -70,49 +72,47 @@ def endpoint_analysis(
     current_hour = now.hour
 
     # ─────────────────────────────────────────────
-    # 1. Endpoint Registry (SOURCE OF TRUTH)
+    # 1. Fetch Raw Traffic (last 5 minutes)
     # ─────────────────────────────────────────────
 
-    endpoints = (
-        db.query(Endpoint)
-        .filter(Endpoint.project_id == project.id)
-        .all()
-    )
-
-    # pattern -> Endpoint
-    endpoint_map = {e.pattern: e for e in endpoints}
-    endpoint_ids = {e.id: e.pattern for e in endpoints}
-
-    # ─────────────────────────────────────────────
-    # 2. Current Traffic (last 5 minutes)
-    # ─────────────────────────────────────────────
-
-    current_rows = (
-        db.query(
-            TrafficLog.endpoint,
-            func.count().label("requests"),
-            func.avg(TrafficLog.risk_score).label("avg_risk"),
-            func.sum(func.cast(TrafficLog.decision == "THROTTLE", Integer)).label("throttled"),
-            func.sum(func.cast(TrafficLog.decision == "BLOCK", Integer)).label("blocked"),
-        )
+    raw_rows = (
+        db.query(TrafficLog)
         .filter(
             TrafficLog.project_id == project.id,
             TrafficLog.created_at >= last_5m,
         )
-        .group_by(TrafficLog.endpoint)
         .all()
     )
 
-    # endpoint_pattern -> stats
-    current_stats = {
-        row.endpoint: {
-            "requests": row.requests or 0,
-            "avg_risk": float(row.avg_risk or 0),
-            "throttled": row.throttled or 0,
-            "blocked": row.blocked or 0,
-        }
-        for row in current_rows
-    }
+    # ─────────────────────────────────────────────
+    # 2. Normalize + Aggregate In Memory
+    # ─────────────────────────────────────────────
+
+    current_stats = defaultdict(lambda: {
+        "requests": 0,
+        "avg_risk_total": 0.0,
+        "throttled": 0,
+        "blocked": 0,
+    })
+
+    for row in raw_rows:
+        normalized = normalize_path(row.endpoint)
+
+        stats = current_stats[normalized]
+        stats["requests"] += 1
+        stats["avg_risk_total"] += float(row.risk_score or 0)
+
+        if row.decision == "THROTTLE":
+            stats["throttled"] += 1
+        if row.decision == "BLOCK":
+            stats["blocked"] += 1
+
+    # finalize averages
+    for endpoint, stats in current_stats.items():
+        if stats["requests"] > 0:
+            stats["avg_risk"] = stats["avg_risk_total"] / stats["requests"]
+        else:
+            stats["avg_risk"] = 0.0
 
     # ─────────────────────────────────────────────
     # 3. Historical Baseline (7-day RPM)
@@ -132,7 +132,15 @@ def endpoint_analysis(
         .all()
     )
 
+    endpoint_ids = {
+        e.id: e.pattern
+        for e in db.query(Endpoint)
+        .filter(Endpoint.project_id == project.id)
+        .all()
+    }
+
     minutes_7d = 7 * 24 * 60
+
     hist_rpm = {
         endpoint_ids[row.endpoint_id]: (row.total or 0) / minutes_7d
         for row in hist_rows
@@ -159,6 +167,7 @@ def endpoint_analysis(
     )
 
     minutes_tod = 7 * 60
+
     tod_rpm = {
         endpoint_ids[row.endpoint_id]: (row.total or 0) / minutes_tod
         for row in tod_rows
@@ -166,12 +175,14 @@ def endpoint_analysis(
     }
 
     # ─────────────────────────────────────────────
-    # 5. Assemble Response
+    # 5. Combine All Normalized Endpoints
     # ─────────────────────────────────────────────
+
+    all_patterns = set(current_stats.keys()) | set(hist_rpm.keys())
 
     results = []
 
-    for pattern in endpoint_map.keys():
+    for pattern in all_patterns:
         curr = current_stats.get(pattern, {})
 
         requests = curr.get("requests", 0)
