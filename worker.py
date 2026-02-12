@@ -1,84 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy.orm import Session
-from collections import defaultdict
-from datetime import datetime
-import logging
-
-from db import get_db
-from config import settings
-from config import settings
-from models import (
-    Project,
-    Domain,
-    APIKey,
-    TrafficLog,
-    Endpoint,
-    MetricBucket,
-)
-from schemas import (
-    WorkerConfigOut,
-    WorkerProjectConfig,
-    TrafficLogIngest,
-)
-
-# ======================================================
-# Setup
-# ======================================================
-
-router = APIRouter(prefix="/internal/worker", tags=["internal"])
-traffic_router = APIRouter(prefix="/internal", tags=["traffic"])
-
-logger = logging.getLogger("securex.control.traffic")
-
-
-# ======================================================
-# Security
-# ======================================================
-
-def verify_worker_secret(x_control_secret: str = Header(...)):
-    if x_control_secret != settings.CONTROL_WORKER_SHARED_SECRET:
-        raise HTTPException(status_code=401, detail="Invalid worker secret")
-
-
-# ======================================================
-# Worker Config Endpoint
-# ======================================================
-
-@router.get(
-    "/config",
-    response_model=WorkerConfigOut,
-    dependencies=[Depends(verify_worker_secret)],
-)
-def get_worker_config(db: Session = Depends(get_db)):
-    projects = db.query(Project).all()
-    domains = db.query(Domain).filter(Domain.verified.is_(True)).all()
-    keys = db.query(APIKey).filter(APIKey.is_active.is_(True)).all()
-
-    domain_map = defaultdict(list)
-    key_map = defaultdict(list)
-
-    for d in domains:
-        domain_map[d.project_id].append(d.hostname)
-
-    for k in keys:
-        key_map[k.project_id].append(k.key_hash)
-
-    return WorkerConfigOut(
-        projects=[
-            WorkerProjectConfig(
-                id=p.id,
-                upstream_url=p.upstream_base_url,
-                domains=domain_map[p.id],
-                api_keys=key_map[p.id],
-            )
-            for p in projects
-        ]
-    )
-
-
-# ======================================================
-# Traffic Ingestion (PRODUCTION SAFE)
-# ======================================================
+from utils import normalize_path
 
 @traffic_router.post(
     "/traffic",
@@ -89,18 +9,27 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
     Canonical traffic ingestion endpoint.
 
     Guarantees:
-    - No crashes
-    - No silent data corruption
-    - Correct aggregation
-    - Stable endpoint normalization
+    - Control API is the authority for endpoint identity
+    - No normalization inconsistency
+    - No endpoint fragmentation
+    - Stable historical aggregation
     """
 
     try:
+        now = datetime.utcnow()
+
         # --------------------------------------------------
-        # 1. Trust worker-normalized endpoint (or fallback)
+        # 1. Canonical Normalization (CONTROL IS AUTHORITY)
         # --------------------------------------------------
-        # CRITICAL: Control API must NOT normalize. Trust the worker.
-        normalized_endpoint = payload.endpoint or payload.path
+        normalized_endpoint = normalize_path(payload.path)
+
+        # Optional: detect worker mismatch (debug only)
+        if payload.endpoint and payload.endpoint != normalized_endpoint:
+            logger.warning(
+                f"Worker endpoint mismatch. "
+                f"Worker: {payload.endpoint}, "
+                f"Control: {normalized_endpoint}"
+            )
 
         # --------------------------------------------------
         # 2. Resolve API Key ID (optional)
@@ -116,7 +45,7 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
                 api_key_id = key.id
 
         # --------------------------------------------------
-        # 3. Endpoint Registry (upsert)
+        # 3. Endpoint Registry (Upsert by Canonical Pattern)
         # --------------------------------------------------
         endpoint = (
             db.query(Endpoint)
@@ -128,8 +57,6 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
             .first()
         )
 
-        now = datetime.utcnow()
-
         if not endpoint:
             endpoint = Endpoint(
                 project_id=payload.project_id,
@@ -139,12 +66,12 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
                 last_seen_at=now,
             )
             db.add(endpoint)
-            db.flush()
+            db.flush()  # ensures endpoint.id is available
         else:
             endpoint.last_seen_at = now
 
         # --------------------------------------------------
-        # 4. Hourly Metric Bucket
+        # 4. Hourly Metric Bucket (Canonical Endpoint Only)
         # --------------------------------------------------
         bucket_start = now.replace(minute=0, second=0, microsecond=0)
 
@@ -185,9 +112,8 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
             bucket.blocked_count += 1
 
         # --------------------------------------------------
-        # 5. Raw Traffic Log (FULL DATA)
+        # 5. Raw Traffic Log (Full Fidelity)
         # --------------------------------------------------
-        # Pydantic already parsed payload.timestamp into a datetime object
         log_timestamp = payload.timestamp or now
 
         log = TrafficLog(
@@ -196,12 +122,16 @@ def ingest_traffic(payload: TrafficLogIngest, db: Session = Depends(get_db)):
             timestamp=log_timestamp,
             ip=payload.ip,
             user_agent=payload.user_agent,
-            path=payload.path,
-            endpoint=normalized_endpoint,
+            path=payload.path,  # raw
+            endpoint=normalized_endpoint,  # canonical
             method=payload.method,
             status_code=payload.status_code,
             decision=payload.decision,
-            risk_score=int(payload.risk_score * 100) if payload.risk_score is not None else None,
+            risk_score=(
+                int(payload.risk_score * 100)
+                if payload.risk_score is not None
+                else None
+            ),
             latency_ms=payload.latency_ms,
         )
 
